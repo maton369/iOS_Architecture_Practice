@@ -1,95 +1,153 @@
 //
 //  ViewController.swift
-//  OriginalMVCSample
+//  CocoaMVCSample
 //
-//  このサンプルは「原初の MVC（Smalltalk 由来の MVC の捉え方）」に寄せた構造になっている。
-//  重要ポイントは次の通り。
-//  - UIKit の UIViewController は、必ずしも “MVC の Controller” ではない（ここでは単なるホスト/ライフサイクルの器）
-//  - 本当の意味での Controller は View の中で生成され、UIイベントを Model に伝える役に徹する
-//  - View は Model の変更を購読（通知）して、見た目（UILabel）を更新する
 //
-//  つまり、UIKit で一般的な「ViewController が View と Model を全部触る」MVC ではなく、
-//  「View と Controller と Model が（概念上）三角形で連携する」古典 MVC をコードに落とした例である。
-//  （ただし UIKit は小さな部品としての Controller を View が持つ文化が薄いので、実用では工夫が必要になりがち）
+//  このサンプルは、いわゆる「Cocoa MVC（UIKit MVC）」の典型形を示している。
+//  つまり “UIViewController が Controller であり、View と Model を仲介する中心” になる構造である。
+//
+//  原初MVC（Smalltalk MVC）との対比で見ると、ここでは ViewController が次を全部担う：
+//    - View の生成/保持（loadView）
+//    - View へのイベントハンドラ登録（addTarget）
+//    - Model の操作（countUp / countDown 呼び出し）
+//    - Model の変更監視（NotificationCenter observer）
+//    - View の更新（label.text を更新）
+//
+//  その結果、処理の流れは「入力（UI）→ ViewController → Model → 通知 → ViewController → View」となる。
+//  Cocoaフレームワークの設計に沿った自然な形だが、規模が大きくなると ViewController が肥大化しやすい
+//  （いわゆる Massive ViewController）という問題にも繋がる。
+//  ただし、このサンプルは最小例として “Cocoa MVC のデータフロー” を理解する教材として優れている。
 //
 
 import UIKit
 
-/// 原初 MVC の場合、`ViewController` はあくまで UIKit の仕組みに則って存在するだけであって、
-/// 実際の Controller としての仕事には関与しないことにご注意ください。
-///
-/// - ここでの ViewController の責務:
-///   - UIKit のライフサイクルに従って View を生成し、画面に載せる
-///   - 「外部から View に Model を渡す」入口になる（DI: Dependency Injection の最小形）
-///
-/// - 逆に “しないこと”:
-///   - ボタンタップの処理（それは Controller がやる）
-///   - Model の状態監視（それは View がやる）
-///
-/// この分離により、UIKit 都合（画面遷移、loadView、viewDidLoad 等）を
-/// アーキテクチャの本質（Controller/Model/View）から切り離して考えられる。
+// MARK: - ViewController (Cocoa MVC の中心)
+//
+// Cocoa MVC における ViewController は、MVC の "C（Controller）" を担うと同時に、
+// UIKit の画面ライフサイクル管理の中心でもある。
+// そのため、本実装では ViewController が Model と View を直接結び付け、イベントも監視も担当している。
 class ViewController: UIViewController {
 
-	/// lazy にしているのは「初回アクセスで生成」したいだけ。
-	/// loadView のタイミングで確実に生成されるので、必須ではないがサンプルとして分かりやすい。
-	private lazy var myView = View()
+	// MARK: Model Injection / Binding
 
-	override func loadView() {
-		/// UIKit では view プロパティに root view をセットするのが基本。
-		/// Storyboard/XIB を使わない場合はここで自前 View を割り当てる。
-		view = myView
-		view.backgroundColor = .white
+	/// 画面に紐付く Model。
+	/// 外部（Composition Root）から注入される想定で、セットされた瞬間に View と結線する。
+	///
+	/// didSet で registerModel() を呼ぶことで、
+	///   - UI の初期表示
+	///   - ボタンイベントの配線
+	///   - Model 変更通知の購読開始
+	/// を一括で開始する。
+	///
+	/// 注意点:
+	/// - didSet は「同じModelを再代入」しても呼ばれるため、二重登録が起きうる。
+	///   実用では「既存 observer を解除してから再登録」や「登録済みガード」が必要になることが多い。
+	var myModel: Model? {
+		didSet { // ViewとModelとを結合し、Modelの監視を開始する
+			registerModel()
+		}
 	}
 
-	override func viewDidLoad() {
-		super.viewDidLoad()
+	// MARK: View Ownership
 
-		/// ここで外部から View に Model を渡しているとイメージしてください。
+	/// 画面の root view。
+	/// lazy にすることで「初回アクセス時に生成」する。
+	/// loadView で view に代入するので、Storyboard を使わないコードベースUIの基本形。
+	private(set) lazy var myView: View = View()
+
+	override func loadView() {
+		/// UIKit は view プロパティを root view として使う。
+		/// ここで自前 View を割り当てる。
+		view = myView
+	}
+
+	deinit {
+		/// Model 側 NotificationCenter から observer を解除する意図。
 		///
-		/// 重要: ViewController が Model を保持していない点がこのサンプルの肝。
-		/// - ViewController は「渡す」だけ
-		/// - 以後の UI イベント処理や状態更新は View/Controller/Model の三者で完結する
+		/// ただし本コードは addObserver(forName:object:queue:using:) を使用しているため、
+		/// 解除には「戻り値のトークン（NSObjectProtocol）を保持して removeObserver(token)」が推奨される。
+		/// removeObserver(self) は旧API（selector型）では有効だが、ここでは効かない/不完全になる可能性がある。
 		///
-		/// DI の観点では、Composition Root（依存を組み立てる場所）がここにある。
-		myView.myModel = Model()
+		/// 実用化するなら：
+		///   - var observerToken: NSObjectProtocol?
+		///   - observerToken = notificationCenter.addObserver(...)
+		///   - deinit { if let t = observerToken { removeObserver(t) } }
+		/// とするのが安全。
+		myModel?.notificationCenter.removeObserver(self)
+	}
+
+	// MARK: Binding logic (View <-> Model)
+
+	/// Model が注入されたタイミングで、View と Model を結線する。
+	/// Cocoa MVC の中心ロジックであり、ここが肥大化しやすいポイントでもある。
+	private func registerModel() {
+
+		guard let model = myModel else { return }
+
+		// --- 1) UI 初期表示 ---
+		// Model の現在状態を View に反映して、画面を正しい状態からスタートさせる。
+		myView.label.text = model.count.description
+
+		// --- 2) UI イベントを ViewController に配線 ---
+		// UIKit の典型：View のイベントは Controller(ViewController) が受ける。
+		// ここが原初MVCと違う点で、ViewControllerがイベント受信点になる。
+		myView.minusButton.addTarget(self, action: #selector(onMinusTapped), for: .touchUpInside)
+		myView.plusButton.addTarget(self, action: #selector(onPlusTapped), for: .touchUpInside)
+
+		// --- 3) Model 変更通知を購読して View を更新 ---
+		// Model の count が変わったら UI を更新する。
+		//
+		// 注意点（実務でバグになりやすい）:
+		// - queue: nil の場合、通知コールバックは投稿側スレッドで動く可能性がある。
+		//   UI 更新は main thread 必須なので queue: .main を指定するのが安全。
+		// - [unowned self] は self が解放済みだとクラッシュする。
+		//   ここでは ViewController のライフサイクル中に通知が来る前提だが、念のため [weak self] が無難。
+		// - さらに、registerModel が複数回呼ばれると observer が複数登録され、UI更新が重複する可能性がある。
+		model.notificationCenter.addObserver(
+			forName: .init(rawValue: "count"),
+			object: nil,
+			queue: nil,
+			using: { [unowned self] notification in
+				if let count = notification.userInfo?["count"] as? Int {
+					// Model → ViewController → View という経路で UI を更新する。
+					self.myView.label.text = "\(count)"
+				}
+			}
+		)
+	}
+
+	// MARK: - Event Handlers (UI → Model)
+
+	/// -1 ボタンが押されたら Model を操作する。
+	/// Cocoa MVC の基本：イベントは ViewController が受け、Model を更新する。
+	@objc func onMinusTapped() {
+		myModel?.countDown()
+	}
+
+	/// +1 ボタンが押されたら Model を操作する。
+	@objc func onPlusTapped() {
+		myModel?.countUp()
 	}
 }
 
-/// Model は「アプリの状態」と「その状態を変える操作（ドメイン操作）」を持つ。
-///
-/// - count を内部状態として保持
-/// - countUp / countDown で状態を更新
-/// - 状態が変わったら通知を飛ばす（Observer パターン）
-///
-/// 本来、Model は「通知機構に依存しない」方がテストもしやすいが、
-/// サンプルでは “変更通知” を明示的に見せるため NotificationCenter を利用している。
+// MARK: - Model
+//
+// Model はアプリ状態（count）と、その状態を変える操作（countUp / countDown）を持つ。
+// 状態変化は NotificationCenter を通じて外部へ通知する（Observerパターン）。
 class Model {
 
-	/// この Model 専用の NotificationCenter を持っている点が特徴。
-	///
-	/// - もし NotificationCenter.default を使うと、
-///   グローバル空間にイベントが拡散し、イベント名衝突や関係ない購読の混入が起きやすい。
-	/// - 専用インスタンスなら、観測範囲が「この Model の利用者」に閉じるため、
-///   依存関係の局所性が保ちやすい。
-	///
-	/// ただし実用では「Publisher/Callback/Delegate」など別手段が使われることも多い。
+	/// Model 専用の NotificationCenter を保持する。
+	/// default を使わないのは「この Model の世界に通知を閉じる」意図があると考えられる。
+	/// ただし実務では Combine / delegate / closure 等の方が型安全で追跡も容易。
 	let notificationCenter = NotificationCenter()
 
-	/// count は外部から “読み取りのみ” 可能にしている。
-	/// - private(set) により、外部が勝手に count を書き換えられない
-	/// - 状態変更は必ず countUp / countDown を経由する
-	/// これにより Model の不変条件（ルール）を守りやすくなる。
+	/// 外部からは読み取りのみ可能にして、書き換えはメソッド経由に限定する。
+	/// これにより Model のルール（不変条件）を守りやすくなる。
 	private(set) var count = 0 {
 		didSet {
-			/// count が変化したら通知を投稿する。
-			///
-			/// - name: "count" というイベント名（文字列）は実用だと定数化したい（typo 防止）
-			/// - userInfo: ["count": count] で値を運ぶ
-			///
-			/// 注意:
-			/// - didSet は “値が変わるたび” に呼ばれるため、頻繁更新だと通知が多発する。
-			/// - UI 更新はメインスレッドで行うべきだが、ここでは queue: nil なので
-			///   通知を受ける側の実行スレッドが投稿側に依存する（＝将来のバグ源）。
+			/// count が変化したら通知を発火する。
+			/// userInfo で値を運ぶため型安全ではない（Stringキー & Any）。
+			/// 実用では Notification.Name と userInfo キーの定数化が推奨。
 			notificationCenter.post(
 				name: .init(rawValue: "count"),
 				object: nil,
@@ -98,123 +156,37 @@ class Model {
 		}
 	}
 
-	/// Model の操作（ユースケース）: カウントを 1 減らす
-	/// ここに「0 未満にしない」等のルールがあるなら、この層で守るのが自然。
+	/// count を 1 減らす操作。
+	/// 0 未満禁止などの制約があるなら、この層でガードするのが自然。
 	func countDown() {
 		count -= 1
 	}
 
-	/// Model の操作（ユースケース）: カウントを 1 増やす
+	/// count を 1 増やす操作。
 	func countUp() {
 		count += 1
 	}
 }
 
-/// ここでの Controller は「UI イベントを Model の操作に変換する」役だけを持つ。
-///
-/// - View の button tap を受けて
-/// - Model の countUp / countDown を呼ぶ
-///
-/// つまり “入力（イベント）→ ドメイン操作” の変換器である。
-///
-/// UIKit の UIViewController と違い、表示更新は行わない（View が担当）。
-class Controller {
-
-	/// Model は弱参照になっている。
-	///
-	/// これは「循環参照を避ける」意図が見えるが、実際には:
-	/// - Controller は View に保持されている（myController）
-	/// - Model は ViewController が生成し View が強参照（myModel）で持つ
-	/// - Model が Controller を保持しているわけではない
-	///
-	/// なので循環参照は起きにくく、weak は “なくても動く” 可能性が高い。
-	/// ただし、設計として「Controller は Model の所有者ではない」を明示したいなら weak はあり。
-	///
-	/// 注意:
-	/// - weak にすると Model が解放された瞬間に nil になり、イベントが無視される。
-	///   ライフサイクル設計が曖昧なままだとデバッグが難しくなる場合もある。
-	weak var myModel: Model?
-
-	/// View が Controller.Type を受け取って init する都合で required init。
-	/// 依存注入（DI）をするなら、init(model:) にしたいところだが、ここでは後で代入している。
-	required init() { }
-
-	/// -1 ボタンが押されたら Model の countDown を呼ぶ
-	/// @objc は Selector 経由で呼ぶために必要（UIButton addTarget/action）
-	@objc func onMinusTapped() {
-		myModel?.countDown()
-	}
-
-	/// +1 ボタンが押されたら Model の countUp を呼ぶ
-	@objc func onPlusTapped() {
-		myModel?.countUp()
-	}
-}
-
-/// View は「見た目（UI）」と「Model の状態反映（表示更新）」を担当する。
-///
-/// ここが原初 MVC っぽさの強い部分で、View が Model を監視して自分を更新する。
-///
-/// さらにこのサンプルでは:
-/// - View が Controller を生成し、ボタンイベントを Controller に委譲する
-/// という形で、View が “Controller の組み立ても担う” 作りになっている。
-///
-/// 実用では Controller の生成は外部（Composition Root）に出すことも多いが、
-/// 「View が Controller を持つ」関係を見せたい意図だと思われる。
+// MARK: - View
+//
+// View は「見た目の部品（UILabel/UIButton）」と「レイアウト」を担当する。
+// Cocoa MVC では View は基本的に “受動的” で、イベント処理や状態管理を持たない。
+// 本実装でも、View はイベントを持たず、UI部品を提供するだけになっている。
 class View: UIView {
 
-	// MARK: - UI Components
+	// MARK: UI components
 
-	/// 表示だけ担当するラベル（Model.count を表示）
+	/// カウント表示用ラベル
 	let label = UILabel()
 
-	/// -1 ボタン（イベントは Controller に流す）
+	/// -1 ボタン（イベント処理は ViewController 側）
 	let minusButton = UIButton()
 
-	/// +1 ボタン（イベントは Controller に流す）
+	/// +1 ボタン（イベント処理は ViewController 側）
 	let plusButton = UIButton()
 
-	// MARK: - MVC Wiring
-
-	/// この View が生成する Controller の型を差し替えられるようにしている。
-	///
-	/// - テスト用 Controller に差し替える
-	/// - 別実装（例えばログ付き、別の操作）に差し替える
-	/// といった拡張点になる。
-	///
-	/// ただし「View が Controller を生成する」設計だと DI の自由度が下がりがちなので、
-	/// 実用では外から Controller インスタンスそのものを注入する設計も検討される。
-	var defaultControllerClass: Controller.Type = Controller.self
-
-	/// View が保持する Controller インスタンス。
-	/// - ボタンのターゲットとして登録されるので、少なくとも View の生存中は生きていてほしい
-	/// - もしローカル変数だけだと解放されて addTarget が無効化される可能性があるため保持している
-	private var myController: Controller?
-
-	/// View が観測する Model。
-	/// ここに Model が注入されることで “画面がデータと結び付く”。
-	var myModel: Model? {
-		didSet {
-			/// Model がセットされたタイミングで:
-			/// - Controller の生成
-			/// - UI の初期表示
-			/// - Model の変更通知の購読
-			/// を開始する
-			registerModel()
-		}
-	}
-
-	deinit {
-		/// NotificationCenter の removeObserver(self) は、旧 API（addObserver(_:selector:)）だと必須だが、
-		/// ここでは addObserver(forName:object:queue:using:) を使っているため、
-		/// 本来は「戻り値のトークン（NSObjectProtocol）を保持して removeObserver(token)」が筋。
-		///
-		/// つまりこの removeObserver(self) は “意図は分かるが、実際には効かない可能性がある”。
-		/// 実用化するなら、observerToken をプロパティに持って deinit で外すのが安全。
-		myModel?.notificationCenter.removeObserver(self)
-	}
-
-	// MARK: - Init
+	// MARK: Init
 
 	override init(frame: CGRect) {
 		super.init(frame: frame)
@@ -223,12 +195,12 @@ class View: UIView {
 	}
 
 	required init?(coder aDecoder: NSCoder) {
-		/// Storyboard/XIB を使わない前提なので nil を返している。
-		/// ただし実務では fatalError("init(coder:) has not been implemented") の方が意図が明確。
+		/// Storyboard 非対応のため nil。
+		/// 実務では fatalError の方が意図が明確なケースが多い。
 		return nil
 	}
 
-	// MARK: - UI Setup
+	// MARK: UI Setup
 
 	private func setSubviews() {
 
@@ -238,7 +210,7 @@ class View: UIView {
 
 		label.textAlignment = .center
 
-		/// サンプルなので色分けで役割が分かりやすいようにしている。
+		// サンプル用の視覚的区別（本番UIではデザインシステムに寄せる）
 		label.backgroundColor = .blue
 		minusButton.backgroundColor = .red
 		plusButton.backgroundColor = .green
@@ -249,90 +221,27 @@ class View: UIView {
 
 	private func setLayout() {
 
-		/// AutoLayout をコードで書く際は translatesAutoresizingMaskIntoConstraints を false
+		// AutoLayout をコードで使うための定石
 		label.translatesAutoresizingMaskIntoConstraints = false
 		plusButton.translatesAutoresizingMaskIntoConstraints = false
 		minusButton.translatesAutoresizingMaskIntoConstraints = false
 
-		/// レイアウトは:
-		/// 上: label
-		/// 下: [-1][+1] ボタンが横並び
-		/// という構造。
+		// レイアウト構造：
+		//  上段：label
+		//  下段：[-1][+1] ボタンが左右に並ぶ
 		label.topAnchor.constraint(equalTo: topAnchor).isActive = true
 		label.leftAnchor.constraint(equalTo: leftAnchor).isActive = true
 		label.rightAnchor.constraint(equalTo: rightAnchor).isActive = true
-
-		/// label の下端は 2 つのボタンの上端に揃える
 		label.bottomAnchor.constraint(equalTo: minusButton.topAnchor).isActive = true
 		label.bottomAnchor.constraint(equalTo: plusButton.topAnchor).isActive = true
-
-		/// label の高さをボタンの高さと同じにする（上:label 下:buttons の 2 段均等）
 		label.heightAnchor.constraint(equalTo: minusButton.heightAnchor).isActive = true
 		label.heightAnchor.constraint(equalTo: plusButton.heightAnchor).isActive = true
 
 		minusButton.bottomAnchor.constraint(equalTo: bottomAnchor).isActive = true
 		plusButton.bottomAnchor.constraint(equalTo: bottomAnchor).isActive = true
-
 		minusButton.leftAnchor.constraint(equalTo: leftAnchor).isActive = true
 		minusButton.rightAnchor.constraint(equalTo: plusButton.leftAnchor).isActive = true
 		plusButton.rightAnchor.constraint(equalTo: rightAnchor).isActive = true
-
-		/// 2 ボタンの幅を等しくして左右均等割り
 		minusButton.widthAnchor.constraint(equalTo: plusButton.widthAnchor).isActive = true
-	}
-
-	// MARK: - Model Registration (MVC Wiring)
-
-	private func registerModel() {
-
-		guard let model = myModel else { return }
-
-		// --- Controller の生成と接続 ---
-
-		/// View 自身が Controller を生成する。
-		/// この時点で「View は Controller を所有する」形になる。
-		let controller = defaultControllerClass.init()
-
-		/// Controller に Model を渡す（イベント → ドメイン操作に必要）
-		controller.myModel = model
-
-		/// View が Controller を保持しておく（ターゲットとして使うため & ライフサイクル維持）
-		myController = controller
-
-		// --- UI の初期表示 ---
-
-		/// Model の現在値を UI に反映
-		label.text = model.count.description
-
-		// --- UI イベントを Controller に配線 ---
-
-		/// ボタンタップは View が受けず、Controller に委譲する（入力変換器としての役割）
-		///
-		/// 注意:
-		/// addTarget は target を強参照しない仕様なので、controller を保持しておく必要がある。
-		minusButton.addTarget(controller, action: #selector(Controller.onMinusTapped), for: .touchUpInside)
-		plusButton.addTarget(controller, action: #selector(Controller.onPlusTapped), for: .touchUpInside)
-
-		// --- Model 変更通知を購読して UI を更新 ---
-
-		/// Model の count 変更を購読し、label を更新する。
-		/// ここが「View が Model を監視して自分を更新する」という原初 MVC の要。
-		///
-		/// 注意点（実務での落とし穴）:
-		/// - queue: nil の場合、通知を受けるスレッドは投稿側に依存する。
-		///   UI 更新は main thread が必須なので、queue: .main を指定するか DispatchQueue.main.async が必要。
-		/// - addObserver(forName:using:) の戻り値トークンを保持して removeObserver(token) すべき。
-		/// - [unowned self] は self が先に解放される可能性があるとクラッシュする。
-		///   安全側なら [weak self] で guard let self = self else { return } がよく使われる。
-		model.notificationCenter.addObserver(
-			forName: .init(rawValue: "count"),
-			object: nil,
-			queue: nil,
-			using: { [unowned self] notification in
-				if let count = notification.userInfo?["count"] as? Int {
-					self.label.text = count.description
-				}
-			}
-		)
 	}
 }
