@@ -2,8 +2,6 @@
 //  ViewModel.swift
 //  RxSimpleSample
 //
-//  Created by Kenji Tanaka on 2018/10/08.
-//  Copyright © 2018年 Kenji Tanaka. All rights reserved.
 //
 //  この ViewModel は「リアクティブな入力→出力」を NotificationCenter で表現するための中核である。
 //  RxSwift/Combine を使うなら Observable/Publisher を返すところだが、このサンプルでは
