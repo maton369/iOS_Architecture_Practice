@@ -2,64 +2,69 @@
 //  ViewController.swift
 //  RxSimpleSample
 //
-//  このサンプルは「Rx（Reactive）っぽい」考え方を、RxSwift/Combine を使わずに
-//  NotificationCenter で再現した最小例である。
 //
-//  重要な構造は以下。
-//  - ViewController は UIイベント（TextFieldの編集）を ViewModel に渡す
-//  - ViewModel は入力（id/password）を検証し、結果（文字列/色）の更新イベントを発火する
-//  - ViewController はそのイベントを購読して UILabel を更新する
+//  この ViewController は、RxSwift/Combine を使わずに「リアクティブなUI更新」を
+//  NotificationCenter で再現した最小サンプルの View（UI層）である。
 //
-//  つまりデータフローは
+//  ここで実現しているアルゴリズム（データフロー）は次の通り。
 //
-//    UI入力(TextField) → ViewModel(検証/状態計算) → 通知(Notification) → UI出力(Label更新)
+//    1) ユーザが TextField に入力する（editingChanged）
+//    2) ViewController が現在の id/password をまとめて ViewModel に渡す
+//    3) ViewModel が入力を検証し、結果を Notification として発火する
+//    4) ViewController が通知を購読して UILabel の text / textColor を更新する
 //
-//  となり、「状態が変わったら通知でUIが変わる」というリアクティブの基本形を手作りしている。
-//  Rx/Combine と違って “購読解除の管理” を自分でやる必要がある点が落とし穴になりやすい。
+//  つまり、入力→検証→出力 の単方向フローが成立している。
+//  Rx/Combine の用語で言えば、
+//    - TextField の入力が “ストリーム”
+//    - ViewModel が “変換（map/validate）”
+//    - Label 更新が “購読（subscribe）”
+//  に相当する。
+//  ただし NotificationCenter を使うため、型安全性や購読解除は手動管理になりやすい点が注意点である。
 //
 
 import UIKit
 
 // MARK: - View (UIViewController)
 //
-// final にすることで継承による振る舞い変更を防ぎ、画面ロジックを固定する。
-// ここでの ViewController の主な責務は次の2つ。
-//  (1) UIイベントを捕捉して ViewModel へ入力として渡す（入力側）
-//  (2) ViewModel からの変更通知を購読して UI を更新する（出力側）
+// final: 継承による挙動変更を防ぎ、サンプルの意図を固定する。
+// ViewController の責務は次の2つに限定されるのが理想。
+//  (1) Input: UIイベントを受け取って ViewModel に渡す
+//  (2) Output: ViewModel の出力イベントを購読して UI を更新する
 final class ViewController: UIViewController {
 
     // MARK: UI Outlets
 
     /// ユーザID入力欄。
-    /// .editingChanged イベントを拾って ViewModel に反映する。
+    /// 文字が変わるたびに .editingChanged イベントが発火し、ViewModel の再評価が走る。
     @IBOutlet private weak var idTextField: UITextField!
 
     /// パスワード入力欄。
-    /// .editingChanged イベントを拾って ViewModel に反映する。
+    /// こちらも同様に .editingChanged を拾い、常に最新の入力状態で検証する。
     @IBOutlet private weak var passwordTextField: UITextField!
 
-    /// 入力が妥当かどうか（またはその理由）を表示するラベル。
-    /// ViewModel からの通知により text と textColor が更新される。
+    /// 検証結果（OK/エラーメッセージ）を表示するラベル。
+    /// text と textColor は ViewModel の通知に応じて更新される。
     @IBOutlet private weak var validationLabel: UILabel!
 
-    // MARK: Reactive-ish Event Bus
+    // MARK: Event Bus (NotificationCenter)
 
-    /// この画面で使う通知センター。
-    /// NotificationCenter.default ではなく独自インスタンスを持つことで、
-    /// 通知のスコープが「この画面/この ViewModel」に閉じ、衝突や外部干渉を防ぎやすい。
+    /// この画面内でのみ使う NotificationCenter。
+    /// NotificationCenter.default ではなくローカルインスタンスを使うことで、
+    /// 通知のスコープを “この画面 + この ViewModel” に閉じる意図がある。
     ///
-    /// ただし実務では、NotificationCenter は “グローバルイベント” 用に使われがちなので、
-    /// ローカルイベントバスとして使う設計はチーム内合意が必要になることが多い。
+    /// 注意:
+    /// - selector型 addObserver を使う場合、基本は removeObserver が必要になることが多い
+    /// - 大規模では Combine/Rx でストリーム化した方が管理が楽になる
     private let notificationCenter = NotificationCenter()
 
     // MARK: ViewModel
 
-    /// ViewModel は「入力(id/password)」を受けて「出力（検証メッセージ/色）」を計算する想定。
-    /// 通知センターを注入しているため、ViewModel は通知の発火を担当する。
+    /// ViewModel は入力（id/password）を受け、検証結果を通知で出す。
+    /// ここでは notificationCenter を注入して共有し、同じバスで publish/subscribe する。
     ///
     /// lazy にしている理由:
-    /// - notificationCenter が初期化された後に ViewModel を作りたい
-    /// - 画面起動時にすぐ使うので通常は即生成と同義
+    /// - notificationCenter が初期化された後に ViewModel を生成する
+    /// - viewDidLoad で必ず使うので実質的には即生成と同等
     private lazy var viewModel = ViewModel(
         notificationCenter: notificationCenter
     )
@@ -69,9 +74,11 @@ final class ViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        // --- 1) UI入力イベントの配線（TextField -> ViewController） ---
-        // テキストが変わるたびに textFieldEditingChanged が呼ばれる。
-        // これを ViewModel へ入力として渡すことで、リアルタイム検証が可能になる。
+        // --- Input wiring: TextField -> ViewController ---
+        // どちらの TextField が変化しても同じハンドラに集約し、
+        // “画面全体の入力状態” を ViewModel に渡して再評価する。
+        //
+        // これにより、片方だけ更新して状態がズレる事故を避けやすい。
         idTextField.addTarget(
             self,
             action: #selector(textFieldEditingChanged),
@@ -83,12 +90,14 @@ final class ViewController: UIViewController {
             for: .editingChanged
         )
 
-        // --- 2) ViewModel 出力イベントの購読（ViewModel -> Notification -> ViewController） ---
-        // ViewModel が発火する通知（changeText/changeColor）を購読して UI を更新する。
+        // --- Output wiring: ViewModel -> NotificationCenter -> ViewController ---
+        // ViewModel が発火する通知を購読し、UILabel を更新する。
         //
-        // selector ベースの addObserver は “self” を observer として登録する旧式API。
-        // この場合、deinit で removeObserver(self) するのが定石。
-        // （iOS 9以降は自動解除されるケースもあるが、挙動に依存すると保守しづらいので明示解除が安全）
+        // ここで購読しているイベントは2つ。
+        // - changeText  : ラベルの文言更新
+        // - changeColor : ラベルの色更新
+        //
+        // Rx/Combine なら label.text と label.textColor へ bind する箇所に相当する。
         notificationCenter.addObserver(
             self,
             selector: #selector(updateValidationText),
@@ -103,33 +112,35 @@ final class ViewController: UIViewController {
             object: nil
         )
 
-        // NOTE（実務的注意）:
-        // - ここで observer を登録しているが、解除処理（deinit / viewWillDisappear 等）が無い。
-        //   ローカル NotificationCenter を使っているので leak は起こりにくいが、
-        //   “通知が残って予期せぬ呼び出し” を避けるため、removeObserver を入れるのが安全。
+        // 実務的補足:
+        // - viewDidLoad で observer 登録した場合、deinit で解除するのが安全。
+        //   このサンプルでは deinit が無いので、次のように入れると事故が減る。
         //
-        // 例:
-        // deinit { notificationCenter.removeObserver(self) }
+        // deinit {
+        //     notificationCenter.removeObserver(self)
+        // }
+        //
+        // また、画面の表示/非表示で購読を切り替えるなら viewWillAppear/viewWillDisappear で管理する。
     }
 }
 
 // MARK: - Input/Output handlers
 //
-// ViewController の役割は「入力を ViewModel に渡す」「出力を UI に適用する」だけに分けると読みやすい。
-// 下の extension はその整理になっている。
+// 入力処理（UI -> ViewModel）と、出力適用（通知 -> UI）を extension に切り出して見通しを良くしている。
 extension ViewController {
 
-    // MARK: Input (UI -> ViewModel)
+    // MARK: Input (UI events)
 
-    /// TextField の編集が変化するたびに呼ばれる。
+    /// TextField の文字が変わったときに呼ばれる。
     ///
-    /// sender がどちらの TextField かは本質ではなく、
-    /// 画面全体の入力状態（idTextField.text と passwordTextField.text）を ViewModel に渡して再評価させる。
+    /// sender は “どちらの TextField か” を表すが、このサンプルのアルゴリズムでは
+    /// 重要なのは “現在の id と password の組” であるため、
+    /// 両方の text をまとめて ViewModel に渡して再評価する。
     ///
     /// アルゴリズム:
-    /// 1) 現在の id/password の文字列を取得（Optional）
-    /// 2) ViewModel に「入力が変わった」ことを通知
-    /// 3) ViewModel が検証し、必要なら changeText/changeColor 通知を発火
+    /// 1) idTextField.text / passwordTextField.text を取得（Optional）
+    /// 2) ViewModel.idPasswordChanged に入力として渡す
+    /// 3) ViewModel が検証し、通知(changeText/changeColor)を発火
     @objc func textFieldEditingChanged(sender: UITextField) {
         viewModel.idPasswordChanged(
             id: idTextField.text,
@@ -137,40 +148,44 @@ extension ViewController {
         )
     }
 
-    // MARK: Output (ViewModel -> UI)
+    // MARK: Output (Notification -> UI)
 
-    /// 検証メッセージ更新通知を受け、UILabel の text を更新する。
+    /// 検証結果テキストの更新通知を受け取って UILabel.text に反映する。
     ///
-    /// この実装では Notification.object に String を詰める設計。
-    /// - 型安全性は低い（Any になる）
-    /// - しかしサンプルとしては「イベントで値を運ぶ」を最小に表現できる
+    /// 設計上の契約:
+    /// - ViewModel は Notification.object に String を載せて送る
+    /// - ViewController はそれを String として解釈する
     ///
-    /// 実務では userInfo のキーを定数化する、または Combine/Rx の型付きストリームを使うのが一般的。
+    /// 型安全ではないため、cast に失敗すると UI が更新されない（guard return）。
+    /// 実務では userInfo + key 定数化、あるいは Combine/Rx への移行が望ましい。
     @objc func updateValidationText(notification: Notification) {
         guard let text = notification.object as? String else { return }
         validationLabel.text = text
     }
 
-    /// 検証状態に応じた色更新通知を受け、UILabel の textColor を更新する。
-    /// Notification.object に UIColor を詰める設計。
+    /// 検証結果色の更新通知を受け取って UILabel.textColor に反映する。
+    ///
+    /// 契約:
+    /// - ViewModel は Notification.object に UIColor を載せて送る
+    /// - ViewController は UIColor として解釈する
     @objc func updateValidationColor(notification: Notification) {
         guard let color = notification.object as? UIColor else { return }
         validationLabel.textColor = color
     }
 }
 
-// MARK: - 実務向け補足（この設計の落とし穴）
+// MARK: - 追加の実務向け注意（設計の落とし穴）
 //
-// 1) “通知名” と “payload” が型安全でない
-//    - Notification.Name が散らばると衝突やtypoが起きやすい
-//    - object に Any を詰めると型ミスが実行時まで分からない
+// 1) 二重登録の危険
+//    viewDidLoad が複数回呼ばれることは通常ないが、再生成や別の経路で observer を追加すると
+//    同じ通知に複数回反応する可能性がある。
+//    → 購読管理を集中させる（deinitで解除、またはトークン保持）
 //
-// 2) ライフサイクルと購読解除
-//    - selector型 addObserver は removeObserver が必要になりやすい
-//    - 画面遷移や再生成で二重登録が起きると、更新が重複する
+// 2) NotificationCenter は型安全でない
+//    text と color の payload が Any になるため、契約違反は実行時まで検出できない。
+//    → 状態を1つにまとめる/型付きストリームにするのが理想
 //
-// 3) Combine/Rx で置き換えるなら
-//    - TextField の入力を Publisher/Observable にし
-//    - ViewModel が validationText/validationColor を出力
-//    - View が bind する
-//   という形にすると “通知の手動管理” を減らせる
+// 3) UI更新は main thread 前提
+//    このサンプルは入力がメインから来るので大丈夫だが、将来 ViewModel が非同期化すると
+//    通知が別スレッドで届く可能性がある。
+//    → UI更新前に main thread を保証する（どちらの層が保証するかを決める）
