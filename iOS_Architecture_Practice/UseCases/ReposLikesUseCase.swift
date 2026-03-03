@@ -2,8 +2,6 @@
 //  ReposLikesUseCase.swift
 //  CleanGitHub
 //
-//  Created by 加藤寛人 on 2018/09/19.
-//  Copyright © 2018年 Peaks. All rights reserved.
 //
 //  このファイルは Clean Architecture における Use Case（ユースケース）を実装している。
 //  Use Case は「アプリケーション固有の業務ルール（Application Business Rules）」を担い、
