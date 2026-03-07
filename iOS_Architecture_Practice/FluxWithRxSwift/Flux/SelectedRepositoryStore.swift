@@ -2,8 +2,6 @@
 //  SelectedRepositoryStore.swift
 //  FluxWithRxSwift
 //
-//  Created by marty-suzuki on 2018/09/16.
-//  Copyright © 2018年 marty-suzuki. All rights reserved.
 //
 //  このファイルは Flux + RxSwift における「現在選択中の Repository」を管理する Store である。
 //  Store の役割は一貫しており、Dispatcher から流れてくる Action を受け取り、
